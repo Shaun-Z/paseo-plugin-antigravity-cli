@@ -484,6 +484,30 @@ export function buildOneShotAgyArgs(options: {
   return args;
 }
 
+function isInjectedAcpTransport(
+  raw: unknown,
+): raw is AgyAcpClientTransport | (() => AgyAcpClientTransport) {
+  if (typeof raw === "function") return true;
+  return Boolean(raw && typeof raw === "object" && "input" in raw && "output" in raw);
+}
+
+/**
+ * The ACP transport a test injected: a stream pair or a factory returning one. Paseo also hands the per-agent
+ * `transport` setting (the string "acp") to the provider in `providerOptions`, which is not a transport; treating it as
+ * one gave readline an undefined input and every launch failed with "input.on is not a function".
+ */
+export function injectedAcpTransport(raw: unknown): AgyAcpClientTransport | undefined {
+  if (typeof raw === "function") return (raw as () => AgyAcpClientTransport)();
+  if (isInjectedAcpTransport(raw)) return raw;
+  return undefined;
+}
+
+function pickInjectedAcpTransport(
+  ...candidates: unknown[]
+): AgyAcpClientTransport | (() => AgyAcpClientTransport) | undefined {
+  return candidates.find(isInjectedAcpTransport);
+}
+
 export function toAcpMcpServers(
   mcpServers: Record<string, McpServerConfig>,
 ): unknown[] {
@@ -1568,12 +1592,12 @@ async function ensureClient(session: AcpSession, emit: Emit): Promise<AgyAcpClie
       const env = home === null ? session.config.env : { ...session.config.env, HOME: home };
       const skipPermissions = approvalPolicy(session) === "skip";
 
-      const rawTransport =
-        session.injectedTransport ??
-        (session.config.providerOptions as Record<string, unknown> | undefined)?.transport ??
-        (session.config.providerOptions as Record<string, unknown> | undefined)?.acpTransport;
-      const transport =
-        typeof rawTransport === "function" ? (rawTransport as () => AgyAcpClientTransport)() : (rawTransport as AgyAcpClientTransport | undefined);
+      const rawTransport = pickInjectedAcpTransport(
+        session.injectedTransport,
+        (session.config.providerOptions as Record<string, unknown> | undefined)?.transport,
+        (session.config.providerOptions as Record<string, unknown> | undefined)?.acpTransport,
+      );
+      const transport = injectedAcpTransport(rawTransport);
 
       const client = new AgyAcpClient(
         {
@@ -3095,10 +3119,11 @@ async function openSession(
   const accountId = resolveAccountId(input.persistence, conversationId);
   const providerOpts = readProviderOptions(config);
 
-  const rawTransport =
-    options.transport ??
-    (config.providerOptions as Record<string, unknown> | undefined)?.transport ??
-    (config.providerOptions as Record<string, unknown> | undefined)?.acpTransport;
+  const rawTransport = pickInjectedAcpTransport(
+    options.transport,
+    (config.providerOptions as Record<string, unknown> | undefined)?.transport,
+    (config.providerOptions as Record<string, unknown> | undefined)?.acpTransport,
+  );
 
   const childCapabilities = state.capabilities.filter((c) => c === "session.subsession");
   const session = new AcpSession(
@@ -3106,7 +3131,7 @@ async function openSession(
     config,
     conversationId,
     accountId,
-    rawTransport as AgyAcpClientTransport | (() => AgyAcpClientTransport) | undefined,
+    rawTransport,
     options.runOneShot,
     options.readTranscriptFile,
     options.statTranscriptFile,
